@@ -90,6 +90,37 @@ def test_inflight_lookup_keeps_short_hedge_leg_independent(monkeypatch):
     )
 
 
+def test_signal_grid_limits_allow_parallel_price_levels_without_database_lookup(monkeypatch):
+    monkeypatch.setattr(
+        live_execution,
+        "get_db_connection",
+        lambda: (_ for _ in ()).throw(AssertionError("parallel virtual grid must bypass lane lock")),
+    )
+
+    request = _request(
+        execution_mode="signal",
+        strategy_type="grid",
+        order_type="limit",
+        client_order_id="grid-7-long-entry-1",
+    )
+
+    assert StrategyV2OrderGateway().has_inflight(request) is False
+
+
+def test_live_grid_limits_keep_position_lane_serialization(monkeypatch):
+    cursor = _Cursor({"id": 99})
+    monkeypatch.setattr(live_execution, "get_db_connection", lambda: _Db(cursor))
+
+    request = _request(
+        execution_mode="live",
+        strategy_type="grid",
+        order_type="limit",
+        client_order_id="grid-7-long-entry-1",
+    )
+
+    assert StrategyV2OrderGateway().has_inflight(request) is True
+
+
 def test_submit_does_not_reconsider_an_ai_rejected_signal(monkeypatch):
     class _IntentService:
         def __init__(self, **_kwargs):

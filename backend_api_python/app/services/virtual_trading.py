@@ -468,6 +468,29 @@ def execute_virtual_signal_order(order_row: Mapping[str, Any], payload: Mapping[
     }
 
 
+def settle_virtual_pending_order(pending_order_id: int) -> dict[str, Any]:
+    """Fill one already-persisted signal order without waiting for the worker poll."""
+    order_id = int(pending_order_id or 0)
+    if order_id <= 0:
+        raise ValueError("virtualTrading.invalidIdentity")
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute("SELECT * FROM pending_orders WHERE id = %s", (order_id,))
+        row = dict(cur.fetchone() or {})
+        cur.close()
+    if not row:
+        raise ValueError("virtualTrading.pendingOrderNotFound")
+    raw_payload = row.get("payload_json")
+    if isinstance(raw_payload, Mapping):
+        payload = dict(raw_payload)
+    elif isinstance(raw_payload, str) and raw_payload.strip():
+        decoded = json.loads(raw_payload)
+        payload = dict(decoded) if isinstance(decoded, Mapping) else {}
+    else:
+        payload = {}
+    return execute_virtual_signal_order(row, payload)
+
+
 def _cancel_virtual_order(pending_order_id: int, virtual_order_id: int, order_intent_id: int) -> None:
     with get_db_connection() as db:
         cur = db.cursor()
@@ -751,4 +774,5 @@ __all__ = [
     "list_virtual_positions",
     "list_virtual_trades",
     "match_virtual_limit_orders",
+    "settle_virtual_pending_order",
 ]

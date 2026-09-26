@@ -244,7 +244,7 @@ def stop_strategy(strategy_id: int):
         close_positions=close_positions,
     )
     status = str(result.get("status") or "")
-    if status in {"stopping", "stopped"}:
+    if status == "stopped":
         get_strategy_service().update_strategy_status(strategy_id, "stopped", user_id=int(g.user_id))
     data = {"id": strategy_id, **result}
     if not result.get("success"):
@@ -252,7 +252,12 @@ def stop_strategy(strategy_id: int):
         return _error(message, 409, data=data)
     if status == "stopping":
         return _ok(data, "strategyV2.stopQueued"), 202
-    message = "strategyV2.stoppedAndCloseQueued" if close_positions else "strategyV2.paused"
+    completed = int(result.get("close_orders_completed") or 0)
+    queued = int(result.get("close_orders_queued") or 0)
+    if close_positions and completed > 0 and completed == queued:
+        message = "strategyV2.stoppedAndVirtualCloseCompleted"
+    else:
+        message = "strategyV2.stoppedAndCloseQueued" if close_positions else "strategyV2.paused"
     return _ok(data, message)
 
 

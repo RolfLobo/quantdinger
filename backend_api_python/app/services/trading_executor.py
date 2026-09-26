@@ -285,6 +285,9 @@ class TradingExecutor:
         """Pause a strategy and optionally queue reduce-only closes for its owned legs."""
         sid = int(strategy_id)
         strategy = self._load_strategy(sid) or {}
+        execution_mode = str(strategy.get("execution_mode") or "live").strip().lower()
+        if close_positions and execution_mode == "signal":
+            return self._stop_signal_strategy_with_virtual_close(sid, strategy)
         positions: List[Dict[str, Any]] = []
         run_id = 0
         if close_positions:
@@ -368,6 +371,96 @@ class TradingExecutor:
             except Exception as exc:
                 logger.exception("Failed to queue stop-and-close for strategy %s", sid)
                 result["close_errors"].append(str(exc or "strategyV2.closeOrderQueueFailed"))
+        if result["close_errors"]:
+            result["success"] = False
+        return result
+
+    def _stop_signal_strategy_with_virtual_close(
+        self,
+        strategy_id: int,
+        strategy: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Stop a signal runtime and synchronously settle all virtual positions."""
+        sid = int(strategy_id)
+        stopped = self.stop_strategy(sid)
+        result: Dict[str, Any] = {
+            "success": bool(stopped),
+            "status": "stopped" if stopped else "running",
+            "close_requested": True,
+            "close_orders_queued": 0,
+            "close_orders_completed": 0,
+            "close_errors": [],
+        }
+        if not stopped:
+            return result
+
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT symbol, side, size, entry_price, current_price, market_type,
+                       strategy_run_id
+                FROM qd_strategy_virtual_positions
+                WHERE strategy_id = %s AND size > 0
+                ORDER BY symbol, side
+                """,
+                (sid,),
+            )
+            positions = [dict(row) for row in (cur.fetchall() or [])]
+            cur.close()
+        if not positions:
+            return result
+
+        from app.services.virtual_trading import settle_virtual_pending_order
+
+        trading_config = _json_object(strategy.get("trading_config"))
+        leverage = max(1.0, float(trading_config.get("leverage") or strategy.get("leverage") or 1.0))
+        notification_config = _json_object(strategy.get("notification_config"))
+        signal_ts = int(time.time())
+        for row in positions:
+            side = str(row.get("side") or "").strip().lower()
+            if side not in {"long", "short"}:
+                result["close_errors"].append("strategyV2.closePositionSideInvalid")
+                continue
+            price = float(row.get("current_price") or row.get("entry_price") or 0.0)
+            quantity = max(0.0, float(row.get("size") or 0.0))
+            run_id = int(row.get("strategy_run_id") or 0)
+            if run_id <= 0:
+                result["close_errors"].append("strategyV2.closeRunIdentityMissing")
+                continue
+            if price <= 0 or quantity <= 0:
+                result["close_errors"].append("strategyV2.closePositionQuoteMissing")
+                continue
+            try:
+                pending_id = self.order_gateway.submit(LiveOrderRequest(
+                    strategy_id=sid,
+                    strategy_run_id=run_id,
+                    user_id=int(strategy.get("user_id") or 0),
+                    symbol=str(row.get("symbol") or ""),
+                    action="close_long" if side == "long" else "close_short",
+                    quantity=quantity,
+                    reference_price=price,
+                    signal_timestamp=signal_ts,
+                    market_type=str(row.get("market_type") or strategy.get("market_type") or "spot"),
+                    execution_mode="signal",
+                    leverage=leverage,
+                    reason="user_stop_and_close",
+                    notification_config=notification_config,
+                    execution_algo="market",
+                    order_type="market",
+                ))
+                if not pending_id:
+                    result["close_errors"].append("strategyV2.closeOrderQueueFailed")
+                    continue
+                result["close_orders_queued"] += 1
+                settlement = settle_virtual_pending_order(pending_id)
+                if str(settlement.get("status") or "") != "filled":
+                    result["close_errors"].append("strategyV2.virtualCloseSettlementFailed")
+                    continue
+                result["close_orders_completed"] += 1
+            except Exception as exc:
+                logger.exception("Failed to settle virtual stop-and-close for strategy %s", sid)
+                result["close_errors"].append(str(exc or "strategyV2.virtualCloseSettlementFailed"))
         if result["close_errors"]:
             result["success"] = False
         return result

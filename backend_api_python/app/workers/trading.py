@@ -211,7 +211,7 @@ class TradingWorker:
                 owner_id=self.worker_id,
             )
             return result
-        if not self.executor.stop_strategy(strategy_id, persist_status=False):
+        if not self.executor.stop_strategy(strategy_id, persist_status=True):
             raise RuntimeError("Executor failed to stop the local strategy runtime.")
         self._lease_heartbeat.forget_strategy(strategy_id)
         self.repository.release_strategy_lease(strategy_id=strategy_id, owner_id=self.worker_id)

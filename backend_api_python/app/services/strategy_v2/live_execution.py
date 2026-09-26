@@ -119,6 +119,16 @@ class StrategyV2OrderGateway:
         each symbol/position leg prevents those semantic duplicates without
         blocking the opposite leg of a true hedge strategy.
         """
+        if (
+            str(request.execution_mode or "").strip().lower() == "signal"
+            and str(request.strategy_type or "").strip().lower() == "grid"
+            and str(request.order_type or "").strip().lower() == "limit"
+            and str(request.client_order_id or "").strip()
+        ):
+            # A generated grid emits several independently tracked price levels
+            # in one cycle.  Their stable client IDs provide idempotency, while
+            # the virtual ledger keeps every level isolated from live execution.
+            return False
         lane = self._position_lane(request.action)
         if not lane:
             return False
